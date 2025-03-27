@@ -166,12 +166,12 @@ if __name__ == '__main__':
                         help='数据加载的工作线程数 (默认: 2)')
     
     # 功能标志
-    parser.add_argument('--train', action='store_true', default=True,
-                        help='训练模型')
-    parser.add_argument('--test', action='store_true', default=True,
-                        help='测试模型')
-    parser.add_argument('--visualize', action='store_true', default=True,
-                        help='可视化模型预测和特征')
+    parser.add_argument('--train', type=lambda x: x.lower() == 'true', default=True,
+                        help='训练模型 (True或False)')
+    parser.add_argument('--test', type=lambda x: x.lower() == 'true', default=True,
+                        help='测试模型 (True或False)')
+    parser.add_argument('--visualize', type=lambda x: x.lower() == 'true', default=True,
+                        help='可视化模型预测和特征 (True或False)')
     
     args = parser.parse_args()
     

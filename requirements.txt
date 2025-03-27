@@ -7,3 +7,4 @@ scikit-learn==1.2.2
 tensorboard==2.13.0
 opencv-python==4.8.0.74
 pillow==9.5.0 
+seaborn
