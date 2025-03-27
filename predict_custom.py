@@ -1,8 +1,39 @@
 import argparse
 import os
-import torch
-from models.cnn_model import SimpleCNN, DeepCNN
-from utils.custom_input import create_drawing_canvas, predict_digit, capture_from_webcam
+import sys
+import traceback
+
+# 尝试导入torch
+try:
+    import torch
+except ImportError:
+    print("错误: 无法导入PyTorch库。请确保已安装PyTorch: pip install torch")
+    sys.exit(1)
+
+try:
+    from PIL import Image
+except ImportError:
+    print("错误: 无法导入PIL库。请确保已安装PIL: pip install pillow")
+    sys.exit(1)
+
+# 尝试导入自定义模块
+try:
+    from models.cnn_model import SimpleCNN, DeepCNN
+except ImportError:
+    print("错误: 无法导入CNN模型。请确保models目录中包含cnn_model.py文件")
+    traceback.print_exc()
+    sys.exit(1)
+
+try:
+    from utils.custom_input import create_drawing_canvas, predict_digit, capture_from_webcam
+except ImportError:
+    print("错误: 无法导入自定义输入模块。请确保utils目录中包含custom_input.py文件")
+    traceback.print_exc()
+    sys.exit(1)
+except Exception as e:
+    print(f"错误: 导入自定义输入模块时出现问题: {e}")
+    traceback.print_exc()
+    sys.exit(1)
 
 def main(args):
     """

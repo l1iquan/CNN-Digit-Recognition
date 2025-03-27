@@ -1,13 +1,13 @@
 import torch
 import numpy as np
-import cv2
-from PIL import Image
+from PIL import Image, ImageOps, ImageFilter
 import matplotlib.pyplot as plt
 import os
+import traceback
 
 def preprocess_image(image_path, target_size=(28, 28)):
     """
-    预处理用户提供的手写数字图像，转换为模型可接受的格式
+    使用PIL替代OpenCV预处理用户提供的手写数字图像
     
     参数:
         image_path: 图像文件路径
@@ -16,55 +16,104 @@ def preprocess_image(image_path, target_size=(28, 28)):
     返回:
         处理后的图像张量，形状为 [1, 1, 28, 28]
     """
-    # 读取图像并转换为灰度
-    image = cv2.imread(image_path)
-    if image is None:
-        raise ValueError(f"无法读取图像: {image_path}")
-    
-    # 转换为灰度图像
-    if len(image.shape) == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = image
-    
-    # 反转颜色（假设手写数字是深色背景上的浅色笔画）
-    gray = cv2.bitwise_not(gray)
-    
-    # 二值化处理
-    _, binary = cv2.threshold(gray, 75, 255, cv2.THRESH_BINARY)
-    
-    # 查找轮廓以定位数字
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    if contours:
-        # 找到最大轮廓，这应该是数字
-        max_contour = max(contours, key=cv2.contourArea)
-        x, y, w, h = cv2.boundingRect(max_contour)
+    try:
+        # 读取图像并转换为灰度
+        image = Image.open(image_path).convert('L')
         
-        # 从原图中裁剪数字区域
-        digit_roi = binary[y:y+h, x:x+w]
+        # 保存原始尺寸用于调试
+        original_size = image.size
+        print(f"原始图像尺寸: {original_size}")
         
-        # 添加边距
-        padding = int(min(w, h) * 0.2)
-        padded_roi = cv2.copyMakeBorder(digit_roi, padding, padding, padding, padding, 
-                                         cv2.BORDER_CONSTANT, value=0)
+        # 提取图像直方图用于分析
+        hist = image.histogram()
         
-        # 调整大小到目标尺寸
-        resized = cv2.resize(padded_roi, target_size, interpolation=cv2.INTER_AREA)
-    else:
-        # 如果没有找到轮廓，直接调整整个图像大小
-        resized = cv2.resize(binary, target_size, interpolation=cv2.INTER_AREA)
-    
-    # 标准化到[0, 1]区间
-    normalized = resized.astype(np.float32) / 255.0
-    
-    # 应用MNIST数据集的均值和标准差进行规范化
-    normalized = (normalized - 0.1307) / 0.3081
-    
-    # 转换为PyTorch张量，并添加批次和通道维度
-    tensor = torch.from_numpy(normalized).unsqueeze(0).unsqueeze(0)
-    
-    return tensor
+        # 判断图像背景颜色（暗背景上的亮数字，或亮背景上的暗数字）
+        # 计算图像平均亮度来决定是否需要反转
+        avg_pixel = sum(i * w for i, w in enumerate(hist)) / sum(hist)
+        print(f"图像平均亮度: {avg_pixel}")
+        
+        # 如果平均亮度大于128，认为是暗数字在亮背景上，需要反转
+        if avg_pixel > 128:
+            image = ImageOps.invert(image)
+            print("图像已反转（亮背景暗数字）")
+        else:
+            print("图像未反转（暗背景亮数字）")
+        
+        # 增强对比度，提高数字与背景的区分度
+        image = ImageOps.autocontrast(image, cutoff=5)
+        
+        # 应用阈值化处理（二值化）- 根据图像分布动态调整阈值
+        # 计算自适应阈值 - 使用Otsu方法的简化版本
+        pixels = list(image.getdata())
+        non_empty_pixels = [p for p in pixels if p > 0]
+        if non_empty_pixels:
+            # 使用平均值作为阈值
+            adaptive_threshold = sum(non_empty_pixels) / len(non_empty_pixels)
+            # 确保阈值在合理范围内
+            adaptive_threshold = max(70, min(adaptive_threshold, 180))
+        else:
+            adaptive_threshold = 128  # 默认值
+        
+        print(f"使用自适应阈值: {adaptive_threshold}")
+        
+        # 二值化
+        image = image.point(lambda p: p > adaptive_threshold and 255)
+        
+        # 尝试找到并居中数字
+        # 将图像转换为numpy数组以便处理
+        img_array = np.array(image)
+        
+        # 找到非零像素的区域（这应该是数字区域）
+        rows = np.any(img_array, axis=1)
+        cols = np.any(img_array, axis=0)
+        
+        if np.any(rows) and np.any(cols):
+            # 找到数字区域的边界
+            rmin, rmax = np.where(rows)[0][[0, -1]]
+            cmin, cmax = np.where(cols)[0][[0, -1]]
+            
+            # 确保边界是有效的
+            if rmin < rmax and cmin < cmax:
+                # 裁剪数字区域
+                digit_region = img_array[rmin:rmax+1, cmin:cmax+1]
+                
+                # 转回PIL图像
+                digit_image = Image.fromarray(digit_region)
+                
+                # 添加边距
+                padding_ratio = 0.2  # 边距比例
+                padding_x = int(digit_image.width * padding_ratio)
+                padding_y = int(digit_image.height * padding_ratio)
+                padded_image = ImageOps.expand(digit_image, border=(padding_x, padding_y, padding_x, padding_y), fill=0)
+                
+                # 更新图像为处理后的图像
+                image = padded_image
+                print(f"已提取并居中数字，大小: {image.size}")
+        
+        # 调整大小到目标尺寸（保持纵横比）
+        ratio = min(target_size[0] / image.width, target_size[1] / image.height)
+        new_size = (int(image.width * ratio), int(image.height * ratio))
+        resized_image = image.resize(new_size, Image.LANCZOS)
+        
+        # 创建新的空白图像并将调整大小后的图像居中放置
+        final_image = Image.new("L", target_size, 0)
+        paste_position = ((target_size[0] - new_size[0]) // 2, (target_size[1] - new_size[1]) // 2)
+        final_image.paste(resized_image, paste_position)
+        
+        # 转换为numpy数组
+        img_array = np.array(final_image).astype(np.float32) / 255.0
+        
+        # 应用MNIST数据集的均值和标准差进行规范化
+        img_array = (img_array - 0.1307) / 0.3081
+        
+        # 转换为PyTorch张量，并添加批次和通道维度
+        tensor = torch.from_numpy(img_array).unsqueeze(0).unsqueeze(0)
+        
+        return tensor
+    except Exception as e:
+        print(f"预处理图像时出错: {e}")
+        traceback.print_exc()
+        raise
 
 def predict_digit(model, image_path, device='cpu', class_names=None):
     """
@@ -126,119 +175,18 @@ def predict_digit(model, image_path, device='cpu', class_names=None):
 
 def capture_from_webcam(output_path='custom_digit.jpg', countdown=3):
     """
-    从网络摄像头捕获图像
-    
-    参数:
-        output_path: 输出图像的路径
-        countdown: 倒计时秒数
-    
-    返回:
-        保存图像的路径
+    从网络摄像头捕获图像 - 此功能需要cv2，在没有cv2情况下返回错误
     """
-    try:
-        # 打开摄像头
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            print("无法打开摄像头")
-            return None
-        
-        # 倒计时
-        for i in range(countdown, 0, -1):
-            ret, frame = cap.read()
-            if not ret:
-                print("无法获取画面")
-                cap.release()
-                return None
-            
-            # 添加倒计时文本
-            cv2.putText(frame, f"拍摄倒计时: {i}", (50, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-            
-            # 显示画面
-            cv2.imshow('Camera', frame)
-            cv2.waitKey(1000)  # 等待1秒
-        
-        # 捕获图像
-        ret, frame = cap.read()
-        if ret:
-            cv2.imwrite(output_path, frame)
-            print(f"图像已保存到 {output_path}")
-        
-        # 释放摄像头
-        cap.release()
-        cv2.destroyAllWindows()
-        
-        return output_path if ret else None
-    
-    except Exception as e:
-        print(f"捕获图像时出错: {e}")
-        return None
+    print("警告：摄像头功能需要OpenCV支持")
+    print("当前环境不支持OpenCV，无法使用摄像头功能")
+    print("请使用文件模式(--mode file)代替")
+    return None
 
 def create_drawing_canvas(output_path='custom_digit.jpg', canvas_size=(500, 500)):
     """
-    创建一个简单的绘图界面，让用户手写数字
-    
-    参数:
-        output_path: 保存绘制图像的路径
-        canvas_size: 画布大小
-        
-    返回:
-        保存图像的路径
+    创建绘图界面 - 此功能需要cv2，在没有cv2的情况下返回错误
     """
-    try:
-        import cv2
-        import numpy as np
-        
-        # 创建空白画布
-        canvas = np.ones((canvas_size[0], canvas_size[1], 3), dtype=np.uint8) * 255
-        draw = False
-        last_x, last_y = -1, -1
-        
-        # 鼠标回调函数
-        def draw_circle(event, x, y, flags, param):
-            nonlocal draw, last_x, last_y, canvas
-            
-            if event == cv2.EVENT_LBUTTONDOWN:
-                # 开始绘制
-                draw = True
-                last_x, last_y = x, y
-            elif event == cv2.EVENT_MOUSEMOVE:
-                if draw:
-                    # 绘制线条
-                    cv2.line(canvas, (last_x, last_y), (x, y), (0, 0, 0), 20)
-                    last_x, last_y = x, y
-            elif event == cv2.EVENT_LBUTTONUP:
-                # 停止绘制
-                draw = False
-        
-        # 创建窗口和回调
-        cv2.namedWindow('Drawing Canvas')
-        cv2.setMouseCallback('Drawing Canvas', draw_circle)
-        
-        while True:
-            # 显示画布
-            display_canvas = canvas.copy()
-            cv2.putText(display_canvas, "绘制数字后按 's' 保存, 按 'c' 清空, 按 'q' 退出", 
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            cv2.imshow('Drawing Canvas', display_canvas)
-            
-            # 处理按键
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('s'):
-                # 保存图像
-                cv2.imwrite(output_path, canvas)
-                print(f"绘制的数字已保存到 {output_path}")
-                break
-            elif key == ord('c'):
-                # 清空画布
-                canvas = np.ones((canvas_size[0], canvas_size[1], 3), dtype=np.uint8) * 255
-            elif key == ord('q'):
-                # 退出
-                return None
-        
-        cv2.destroyAllWindows()
-        return output_path
-    
-    except Exception as e:
-        print(f"创建绘图界面时出错: {e}")
-        return None 
+    print("警告：绘图功能需要OpenCV支持")
+    print("当前环境不支持OpenCV，无法使用绘图功能")
+    print("请使用文件模式(--mode file)代替")
+    return None 
